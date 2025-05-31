@@ -68,7 +68,7 @@ const CalBookingSchema = z.object({
   startTime: z.string().datetime(),
   endTime: z.string().datetime(),
   location: z.string().optional(),
-  status: z.enum(['PENDING', 'CONFIRMED', 'CANCELLED', 'REJECTED', 'ABSENT']),
+  status: z.enum(['PENDING', 'CONFIRMED', 'ACCEPTED', 'CANCELLED', 'REJECTED', 'ABSENT']),
   paid: z.boolean().optional(),
   attendees: z.array(
     z.object({
@@ -81,12 +81,12 @@ const CalBookingSchema = z.object({
   user: z.any().optional(),
   payment: z.array(z.record(z.any())).optional(),
   metadata: z.record(z.any()).optional(),
-  cancellationReason: z.string().optional(),
-  rejectionReason: z.string().optional(),  
-  dynamicEventSlugRef: z.string().optional(),
-  dynamicGroupSlugRef: z.string().optional(),
+  cancellationReason: z.string().nullable().optional(),
+  rejectionReason: z.string().nullable().optional(),  
+  dynamicEventSlugRef: z.string().nullable().optional(),
+  dynamicGroupSlugRef: z.string().nullable().optional(),
   responses: z.record(z.any()).optional(),
-  smsReminderNumber: z.string().optional(),
+  smsReminderNumber: z.string().nullable().optional(),
   scheduledJobs: z.array(z.any()).optional(),
   references: z.array(
     z.object({
@@ -105,9 +105,9 @@ const CalBookingSchema = z.object({
   currency: z.string().optional(),
   paymentId: z.string().optional(),
   refunded: z.boolean().optional(),
-  rescheduled: z.boolean().optional(),
-  fromReschedule: z.string().optional(),
-  recurringEventId: z.string().optional(),
+  rescheduled: z.boolean().nullable().optional(),
+  fromReschedule: z.string().nullable().optional(),
+  recurringEventId: z.string().nullable().optional(),
   recurringEvent: z.any().optional(),
 });
 
@@ -120,7 +120,7 @@ export class CalService {
   private baseUrl: string;
 
   private constructor() {
-    this.apiKey = process.env.CAL_API_KEY || 'cal_live_4464ff12ea696c4d81777d5e5273e113';
+    this.apiKey = process.env.CAL_API_KEY || 'cal_live_0d4b2fd2596b29344106844a20c34643';
     this.baseUrl = process.env.CAL_API_URL || 'https://api.cal.com/api/v1';
     
     if (!this.apiKey) {
@@ -181,6 +181,7 @@ export class CalService {
     return CalService.instance;
   }
 
+
   /**
    * Obtiene todos los tipos de eventos disponibles
    */
@@ -226,47 +227,62 @@ export class CalService {
       console.log('📡 URL de la API:', this.baseUrl);
       console.log('📤 Preparando datos de reserva:', JSON.stringify(bookingData, null, 2));
 
-      // 1. Primero creamos un pago pendiente
-      const price = bookingData.metadata?.price || 0;
-      const description = `Turno para ${bookingData.responses.name} el ${new Date(bookingData.start).toLocaleString()}`;
-      
-      const paymentData = {
-        title: `Turno - ${bookingData.metadata?.service || 'Servicio'}`,
-        description: description,
-        quantity: 1,
-        currency_id: 'ARS',
-        unit_price: Number(price),  // Asegurarse de que sea un número
-        external_reference: JSON.stringify({
-          eventTypeId: bookingData.eventTypeId,
-          start: bookingData.start,
-          end: bookingData.end,
-          timeZone: bookingData.timeZone,
-          language: bookingData.language,
-          responses: bookingData.responses,
-          metadata: bookingData.metadata
-        })
-      };
-
-      // 2. Generamos el enlace de pago
-      const paymentLink = await paymentService.createPaymentLink(paymentData);
-      
-      if (!paymentLink?.url) {
-        throw new Error('No se pudo generar el enlace de pago');
-      }
-
-      console.log('🔗 Enlace de pago generado:', paymentLink.url);
-      
-      // 3. Retornamos el enlace de pago sin crear la reserva aún
-      return { booking: null, paymentUrl: paymentLink.url };
-      
-    } catch (error: any) {
-      console.error('❌ Error en createBooking:', {
-        message: error.message,
-        stack: error.stack
-      });
-      throw new Error(`No se pudo procesar la solicitud: ${error.message}`);
+    // 1. Crear la reserva directamente en Cal.com
+    if (bookingData.metadata?.price && typeof bookingData.metadata.price !== 'string') {
+      bookingData.metadata.price = String(bookingData.metadata.price);
     }
+    const response = await this.client.post('/bookings', bookingData);
+
+    console.log('✅ Reserva creada en Cal.com:', response.data);
+
+    const result = CalBookingSchema.safeParse(response.data);
+    if (!result.success) {
+      console.error('❌ Error al validar la reserva creada:', result.error);
+      throw new Error('Respuesta del servidor no válida al crear la reserva');
+    }
+
+    const booking = result.data;
+
+    // 2. Crear el link de pago (como ya hacías)
+    const price = bookingData.metadata?.price || 0;
+    const description = `Turno para ${bookingData.responses.name} el ${new Date(bookingData.start).toLocaleString()}`;
+
+    const paymentData = {
+      title: `Turno - ${bookingData.metadata?.service || 'Servicio'}`,
+      description,
+      quantity: 1,
+      currency_id: 'ARS',
+      unit_price: Number(price),
+      external_reference: JSON.stringify({
+        bookingUid: booking.uid,
+        eventTypeId: bookingData.eventTypeId,
+        start: bookingData.start,
+        end: bookingData.end,
+        timeZone: bookingData.timeZone,
+        responses: bookingData.responses,
+        metadata: bookingData.metadata
+      })
+    };
+
+    const paymentLink = await paymentService.createPaymentLink(paymentData);
+
+    if (!paymentLink?.url) {
+      throw new Error('No se pudo generar el enlace de pago');
+    }
+
+    console.log('🔗 Enlace de pago generado:', paymentLink.url);
+
+    return { booking, paymentUrl: paymentLink.url };
+
+  } catch (error: any) {
+    console.error('❌ Error en createBooking:', {
+      message: error.message,
+      stack: error.stack,
+      response: error.response?.data
+    });
+    throw new Error(`No se pudo procesar la solicitud: ${error.message}`);
   }
+}
 
   /**
    * Confirma una reserva después de un pago exitoso

@@ -21,19 +21,69 @@ export interface TurnoData {
 const paymentService = PaymentService.getInstance();
 const calService = CalService.getInstance();
 
-// Función para verificar disponibilidad de fecha (simulada)
 async function verificarDisponibilidad(fecha: Date): Promise<boolean> {
-    // Aquí implementarías la lógica real con Cal.com
-    // Por ahora, simulamos que siempre hay disponibilidad
-    return true;
+    const calService = CalService.getInstance();
+    const eventTypeId = 2564237;
+    const timeZone = 'America/Argentina/Buenos_Aires';
+
+    // Rango del día completo
+    const startOfDay = new Date(fecha);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(fecha);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const dateFrom = startOfDay.toISOString();
+    const dateTo = endOfDay.toISOString();
+    const dateKey = dateFrom.split('T')[0]; // clave en formato "YYYY-MM-DD"
+
+    try {
+        const disponibilidad = await calService.getEventTypeAvailability(eventTypeId, dateFrom, dateTo, timeZone);
+        // 🔍 Loguear todo lo que viene de Cal.com
+        console.log('📆 Disponibilidad recibida desde Cal.com:');
+        console.dir(disponibilidad, { depth: null });
+
+        const slots = disponibilidad[dateKey];
+        return Array.isArray(slots) && slots.length > 0;
+    } catch (error) {
+        console.error('❌ Error al verificar disponibilidad por fecha:', error);
+        return false;
+    }
 }
 
-// Función para verificar disponibilidad de horario (simulada)
+
 async function verificarDisponibilidadHorario(startTime: Date, endTime: Date): Promise<boolean> {
-    // Aquí implementarías la lógica real con Cal.com
-    // Verificar colisiones de horarios, etc.
-    return true;
+    const calService = CalService.getInstance();
+    const eventTypeId = 2564237;
+    const timeZone = 'America/Argentina/Buenos_Aires';
+
+    const dateFrom = startTime.toISOString();
+    const dateTo = endTime.toISOString();
+    const dateKey = dateFrom.split('T')[0]; // "YYYY-MM-DD"
+    
+
+    try {
+        const disponibilidad = await calService.getEventTypeAvailability(eventTypeId, dateFrom, dateTo, timeZone);
+
+        // 🔍 Loguear todo lo que viene de Cal.com
+        console.log('📆 HORA Disponibilidad recibida desde Cal.com:');
+        console.dir(disponibilidad, { depth: null });
+
+        const slots = disponibilidad[dateKey];
+        if (!Array.isArray(slots)) return false;
+
+        const targetTimestamp = startTime.getTime();
+
+        return slots.some(slot => {
+            const slotDate = new Date(slot.time);
+            return slotDate.getTime() === targetTimestamp;
+        });
+
+    } catch (error) {
+        console.error('❌ Error al verificar disponibilidad por horario:', error);
+        return false;
+    }
 }
+
 
 // Esquema para validar los datos del turno
 const TurnoSchema = z.object({
@@ -87,7 +137,12 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
             await state.update({ 
                 servicio: servicio.nombre,
                 duracion: servicio.duracion,
-                precio: servicio.precio
+                precio: servicio.precio,
+                eventTypeId: {
+                    'Corte de cabello': 2564237,
+                    'Corte y barba': 2564511,
+                    'Barba': 2564507
+                }[servicio.nombre]
             });
             
             await flowDynamic(`✅ *${servicio.nombre}* seleccionado. Duración: ${servicio.duracion} minutos.`);
@@ -96,11 +151,10 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
     .addAnswer(
         '📅 Ingresa la fecha deseada (DD/MM/AAAA):', 
         { capture: true }, 
-        async (ctx, { state, flowDynamic }) => {
+        async (ctx, { state, flowDynamic, fallBack }) => {
             const fechaRegex = /^(0[1-9]|[12][0-9]|3[01])\/(0[1-9]|1[0-2])\/(20\d{2})$/;
             if (!fechaRegex.test(ctx.body)) {
-                await flowDynamic('❌ Formato de fecha inválido. Por favor usa el formato DD/MM/AAAA');
-                return null;
+                return fallBack('❌ Formato de fecha inválido. Por favor usa el formato DD/MM/AAAA');
             }
             
             const [day, month, year] = ctx.body.split('/').map(Number);
@@ -109,15 +163,13 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
             hoy.setHours(0, 0, 0, 0);
             
             if (fechaSeleccionada < hoy) {
-                await flowDynamic('❌ No se pueden agendar citas en fechas pasadas. Por favor, elige otra fecha.');
-                return null;
+                return fallBack('❌ No se pueden agendar citas en fechas pasadas. Por favor, elige otra fecha.');
             }
             
             // Verificar disponibilidad con Cal.com
             const disponibilidad = await verificarDisponibilidad(fechaSeleccionada);
             if (!disponibilidad) {
-                await flowDynamic('❌ No hay disponibilidad para la fecha seleccionada. Por favor, elige otra fecha.');
-                return null;
+                return fallBack('❌ No hay disponibilidad para la fecha seleccionada. Por favor, elige otra fecha.');
             }
             
             await state.update({ 
@@ -129,11 +181,11 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
     .addAnswer(
         '⏰ ¿A qué hora prefieres tu cita? (HH:MM en formato 24h, por ejemplo: 14:30)',
         { capture: true },
-        async (ctx, { state, flowDynamic }) => {
+        async (ctx, { state, flowDynamic, fallBack }) => {
             const horaRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
             if (!horaRegex.test(ctx.body)) {
-                await flowDynamic('❌ Formato de hora inválido. Por favor usa el formato HH:MM (ejemplo: 14:30)');
-                return null;
+                return fallBack('❌ Formato de hora inválido. Por favor usa el formato HH:MM (ejemplo: 14:30)');
+                
             }
             
             const [hours, minutes] = ctx.body.split(':').map(Number);
@@ -141,8 +193,7 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
             const duracion = await state.get('duracion');
             
             if (!fechaObj || !duracion) {
-                await flowDynamic('❌ Error al obtener la información de la cita. Por favor, comienza de nuevo.');
-                return null;
+                return fallBack('❌ Error al obtener la información de la cita. Por favor, comienza de nuevo.');
             }
             
             // Crear fechas de inicio y fin
@@ -156,15 +207,15 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
             const horaFin = 20;   // 8 PM
             
             if (hours < horaInicio || hours >= horaFin) {
-                await flowDynamic(`❌ Nuestro horario de atención es de ${horaInicio}:00 a ${horaFin}:00. Por favor, elige otro horario.`);
-                return null;
+                return fallBack(`❌ Nuestro horario de atención es de ${horaInicio}:00 a ${horaFin}:00. Por favor, elige otro horario.`);
+               
             }
             
             // Verificar disponibilidad del horario
             const horarioDisponible = await verificarDisponibilidadHorario(startTime, endTime);
             if (!horarioDisponible) {
-                await flowDynamic('❌ El horario seleccionado no está disponible. Por favor, elige otro horario.');
-                return null;
+                return fallBack('❌ El horario seleccionado no está disponible. Por favor, elige otro horario.');
+                
             }
             
             await state.update({
@@ -241,8 +292,13 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
                     }
 
                     // Crear el turno y obtener enlace de pago
+                    const datos = state.getMyState();
                     const { paymentUrl } = await calService.createBooking({
-                        eventTypeId: 1, // ID del tipo de evento en Cal.com
+                        eventTypeId: {
+                            'Corte de cabello': 2564237,
+                            'Corte y barba': 2564511,
+                            'Barba': 2564507
+                          }[datos.servicio],
                         start: startTime.toISOString(),
                         end: endTime.toISOString(),
                         timeZone: 'America/Argentina/Buenos_Aires',
@@ -266,7 +322,7 @@ export const solicitarTurnoFlow = addKeyword<Provider, Database>(['solicitar', '
                     // Guardar el estado del turno pendiente de pago
                     await state.update({
                         pendingBooking: {
-                            eventTypeId: 1,
+                            eventTypeId: datos.eventTypeId,
                             start: startTime.toISOString(),
                             end: endTime.toISOString(),
                             timeZone: 'America/Argentina/Buenos_Aires',
